@@ -2,7 +2,7 @@
 
 Fetch any URL. Get clean markdown. No noise.
 
-Web pages are drowning in navbars, cookie banners, and ad wrappers. You want the content. `url2md` strips everything else and hands you readable markdown — ready for LLMs, note-taking, or offline reading.
+`url2md` fetches a web page, extracts the main content, strips navigation/ads/noise, and outputs clean markdown.
 
 ## How it works
 
@@ -23,13 +23,15 @@ url2md https://example.com/blog/post -o post.md
 Python 3.10+ required.
 
 ```bash
-pip install "scrapling[shell]"
+git clone https://github.com/indi256s/url2md.git
+cd url2md
+pip install -r requirements.txt
 ```
 
-Then either alias it or run directly:
+Optionally add an alias to your shell config (`.zshrc` / `.bashrc`):
 
 ```bash
-alias url2md='python3 /path/to/url2md.py'
+alias url2md='python3 /absolute/path/to/url2md.py'
 ```
 
 ## Usage
@@ -77,7 +79,7 @@ Override with `--selector` when you know exactly where the content lives.
 
 ## Integration with Claude
 
-### Claude Code
+### Claude Code & Cowork
 
 Two ways to use url2md with Claude Code:
 
@@ -88,6 +90,8 @@ Register the tool so Claude can use it automatically:
 ```bash
 claude mcp add url2md -- python3 /absolute/path/to/mcp_server.py
 ```
+
+This registers the tool for the current project. To make it available across all projects, add `--scope user`.
 
 **Option B — Custom slash command**
 
@@ -100,6 +104,8 @@ Return the stdout output as markdown.
 ```
 
 Then use it with `/url2md https://example.com`.
+
+For team use with Claude Cowork, commit `.claude/commands/url2md.md` to your shared repository — all team members get the `/url2md` command automatically.
 
 ### Claude Desktop
 
