@@ -7,9 +7,9 @@ import logging
 import re
 import sys
 from collections import deque
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urldefrag, urljoin, urlparse
 
-logging.disable(logging.WARNING)
+logging.disable(logging.CRITICAL)
 
 from lxml import etree
 from scrapling import Fetcher
@@ -28,6 +28,10 @@ NOISE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Pre-compiled regexes for slugify
+_SLUG_STRIP = re.compile(r"[^\w\s-]")
+_SLUG_HYPHENS = re.compile(r"[\s]+")
+
 # CSS selectors to try for main content, in priority order
 CONTENT_SELECTORS = [
     "article",
@@ -44,19 +48,28 @@ CONTENT_SELECTORS = [
 ]
 
 
+class FetchError(Exception):
+    pass
+
+
+class ExtractionError(Exception):
+    pass
+
+
 def css_first(resp, selector: str):
     """Return the first match for a CSS selector, or None."""
     results = resp.css(selector)
     return results[0] if results else None
 
 
-def fetch_page(url: str, timeout: int = 30):
-    """Fetch a URL and return the Scrapling response."""
-    fetcher = Fetcher()
-    resp = fetcher.get(url, timeout=timeout, verify=False)
+def fetch_page(fetcher: Fetcher, url: str, timeout: int = 30):
+    """Fetch a URL and return the Scrapling response, or raise FetchError."""
+    try:
+        resp = fetcher.get(url, timeout=timeout, verify=False)
+    except Exception as e:
+        raise FetchError(f"failed to fetch {url}: {e}") from e
     if resp.status != 200:
-        print(f"Error: HTTP {resp.status} for {url}", file=sys.stderr)
-        sys.exit(1)
+        raise FetchError(f"HTTP {resp.status} for {url}")
     return resp
 
 
@@ -89,22 +102,20 @@ def find_content_element(resp, selector: str | None = None):
 
 def strip_noise(tree):
     """Remove noisy elements from an lxml tree (in place)."""
-    # Remove unwanted tags
-    for tag in STRIP_TAGS:
-        for el in tree.iter(tag):
-            parent = el.getparent()
-            if parent is not None:
-                parent.remove(el)
+    etree.strip_elements(tree, *STRIP_TAGS)
 
-    # Remove elements with noisy class/id attributes
+    # Snapshot into list to avoid mutating during iteration
+    to_remove = []
     for el in tree.iter():
         for attr in ("class", "id"):
             val = el.get(attr, "")
             if val and NOISE_PATTERN.search(val):
-                parent = el.getparent()
-                if parent is not None:
-                    parent.remove(el)
+                to_remove.append(el)
                 break
+    for el in to_remove:
+        parent = el.getparent()
+        if parent is not None:
+            parent.remove(el)
 
 
 def to_markdown(html_content: str) -> str:
@@ -120,59 +131,40 @@ def to_markdown(html_content: str) -> str:
 
 def post_process(md: str) -> str:
     """Clean up generated markdown."""
-    # Strip trailing whitespace per line
-    lines = [line.rstrip() for line in md.splitlines()]
-    # Collapse 3+ blank lines into 2
-    result = []
-    blank_count = 0
-    for line in lines:
-        if line == "":
-            blank_count += 1
-            if blank_count <= 2:
-                result.append(line)
-        else:
-            blank_count = 0
-            result.append(line)
-    return "\n".join(result).strip() + "\n"
+    md = re.sub(r"[^\S\n]+$", "", md, flags=re.MULTILINE)
+    md = re.sub(r"\n{3,}", "\n\n", md)
+    return md.strip() + "\n"
 
 
 def extract_page(resp, selector: str | None = None, raw: bool = False) -> str:
-    """Extract and convert a single page to markdown."""
+    """Extract and convert a single page to markdown. Raises ExtractionError."""
     if raw:
-        body = css_first(resp, "body")
-        if not body:
-            print("Error: no <body> found", file=sys.stderr)
-            sys.exit(1)
-        content_el = body
+        content_el = css_first(resp, "body")
+        if not content_el:
+            raise ExtractionError("no <body> found")
     else:
         content_el = find_content_element(resp, selector)
         if not content_el:
-            print("Error: no content element found", file=sys.stderr)
-            sys.exit(1)
+            raise ExtractionError("no content element found")
 
     # Get the lxml element and work on a deep copy
-    lxml_el = content_el._root
-    tree = copy.deepcopy(lxml_el)
+    tree = copy.deepcopy(content_el._root)
     strip_noise(tree)
 
     html_str = etree.tostring(tree, encoding="unicode", method="html")
     return to_markdown(html_str)
 
 
-def collect_internal_links(resp, seed_url: str) -> list[str]:
+def collect_internal_links(resp, seed_url: str, parsed_seed, seed_path: str) -> list[str]:
     """Collect internal links that share domain and path prefix with seed URL."""
-    parsed_seed = urlparse(seed_url)
-    seed_path = parsed_seed.path.rsplit("/", 1)[0] + "/"
     links = []
     seen = set()
 
     for a in resp.css("a[href]"):
         href = a.attrib.get("href", "")
-        if not href or href.startswith("#") or href.startswith("javascript:"):
+        if not href or href.startswith(("#", "javascript:")):
             continue
-        full_url = urljoin(seed_url, href)
-        # Strip fragment
-        full_url = full_url.split("#")[0]
+        full_url = urldefrag(urljoin(seed_url, href))[0]
         parsed = urlparse(full_url)
         if parsed.netloc != parsed_seed.netloc:
             continue
@@ -188,50 +180,54 @@ def collect_internal_links(resp, seed_url: str) -> list[str]:
 def slugify(text: str) -> str:
     """Create a markdown-compatible anchor slug from text."""
     slug = text.lower()
-    slug = re.sub(r"[^\w\s-]", "", slug)
-    slug = re.sub(r"[\s]+", "-", slug)
+    slug = _SLUG_STRIP.sub("", slug)
+    slug = _SLUG_HYPHENS.sub("-", slug)
     return slug.strip("-")
 
 
-def crawl(seed_url: str, depth: int, max_pages: int, timeout: int,
-          selector: str | None, raw: bool) -> str:
+def crawl(fetcher: Fetcher, seed_url: str, depth: int, max_pages: int,
+          timeout: int, selector: str | None, raw: bool) -> str:
     """BFS crawl from seed URL and return combined markdown."""
     visited: set[str] = set()
     queue: deque[tuple[str, int]] = deque()
     queue.append((seed_url, 0))
     visited.add(seed_url)
 
+    parsed_seed = urlparse(seed_url)
+    seed_path = parsed_seed.path.rsplit("/", 1)[0] + "/"
+
     pages: list[tuple[str, str, str]] = []  # (url, title, markdown)
 
     while queue and len(pages) < max_pages:
         url, current_depth = queue.popleft()
         try:
-            resp = fetch_page(url, timeout)
-        except SystemExit:
-            continue
-        except Exception as e:
-            print(f"Warning: failed to fetch {url}: {e}", file=sys.stderr)
+            resp = fetch_page(fetcher, url, timeout)
+        except (FetchError, Exception) as e:
+            print(f"Warning: {e}", file=sys.stderr)
             continue
 
-        title = extract_title(resp) or url
-        md = extract_page(resp, selector, raw)
+        try:
+            title = extract_title(resp) or url
+            md = extract_page(resp, selector, raw)
+        except ExtractionError as e:
+            print(f"Warning: {e} on {url}", file=sys.stderr)
+            continue
+
         pages.append((url, title, md))
 
         if current_depth < depth:
-            for link in collect_internal_links(resp, seed_url):
+            for link in collect_internal_links(resp, seed_url, parsed_seed, seed_path):
                 if link not in visited:
                     visited.add(link)
                     queue.append((link, current_depth + 1))
 
     if not pages:
-        print("Error: no pages fetched", file=sys.stderr)
-        sys.exit(1)
+        sys.exit("Error: no pages fetched")
 
     # Build combined document
     seed_title = pages[0][1]
-    parsed = urlparse(seed_url)
     parts = [f"# {seed_title}\n"]
-    parts.append(f"> Crawled {len(pages)} pages from {parsed.netloc}\n")
+    parts.append(f"> Crawled {len(pages)} pages from {parsed_seed.netloc}\n")
 
     # Table of contents
     parts.append("## Table of Contents")
@@ -276,14 +272,22 @@ def main():
 
     args = parser.parse_args()
     url = normalize_url(args.url)
+    fetcher = Fetcher()
 
     if args.depth > 0:
-        md = crawl(url, args.depth, args.max_pages, args.timeout,
+        md = crawl(fetcher, url, args.depth, args.max_pages, args.timeout,
                    args.selector, args.raw)
     else:
-        resp = fetch_page(url, args.timeout)
+        try:
+            resp = fetch_page(fetcher, url, args.timeout)
+        except FetchError as e:
+            sys.exit(f"Error: {e}")
+
         title = extract_title(resp)
-        page_md = extract_page(resp, args.selector, args.raw)
+        try:
+            page_md = extract_page(resp, args.selector, args.raw)
+        except ExtractionError as e:
+            sys.exit(f"Error: {e}")
 
         final_url = resp.url if hasattr(resp, "url") else url
         parts = []
