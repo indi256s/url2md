@@ -75,9 +75,60 @@ The tool tries these selectors in order and picks the first match:
 
 Override with `--selector` when you know exactly where the content lives.
 
-## Claude Code skill
+## Integration with Claude
 
-Works as a `/url2md` slash command in Claude Code and Cowork. The page content gets injected directly into conversation context — no copy-paste needed.
+### Claude Code
+
+Two ways to use url2md with Claude Code:
+
+**Option A — MCP server (recommended)**
+
+Register the tool so Claude can use it automatically:
+
+```bash
+claude mcp add url2md -- python3 /absolute/path/to/mcp_server.py
+```
+
+**Option B — Custom slash command**
+
+Create `.claude/commands/url2md.md` in your project:
+
+```markdown
+Use the Bash tool to run: python3 /absolute/path/to/url2md.py $ARGUMENTS
+
+Return the stdout output as markdown.
+```
+
+Then use it with `/url2md https://example.com`.
+
+### Claude Desktop
+
+1. Install dependencies:
+   ```bash
+   pip install "scrapling[shell]" mcp
+   ```
+2. Find your Python path:
+   ```bash
+   which python3
+   ```
+3. Add to `claude_desktop_config.json`:
+   ```json
+   {
+     "mcpServers": {
+       "url2md": {
+         "command": "/absolute/path/to/python3",
+         "args": ["/absolute/path/to/mcp_server.py"]
+       }
+     }
+   }
+   ```
+4. Config file locations:
+   - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+   - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+   - Linux: `~/.config/Claude/claude_desktop_config.json`
+5. Restart Claude Desktop.
+
+**Important:** Use absolute paths for both the Python interpreter and `mcp_server.py`. Claude Desktop does not inherit your shell PATH.
 
 ## Dependencies
 

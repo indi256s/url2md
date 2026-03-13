@@ -9,8 +9,6 @@ import sys
 from collections import deque
 from urllib.parse import urldefrag, urljoin, urlparse
 
-logging.disable(logging.CRITICAL)
-
 from lxml import etree
 from scrapling import Fetcher
 from markdownify import markdownify
@@ -222,7 +220,7 @@ def crawl(fetcher: Fetcher, seed_url: str, depth: int, max_pages: int,
                     queue.append((link, current_depth + 1))
 
     if not pages:
-        sys.exit("Error: no pages fetched")
+        raise ExtractionError("no pages fetched")
 
     # Build combined document
     seed_title = pages[0][1]
@@ -255,6 +253,7 @@ def normalize_url(url: str) -> str:
 
 
 def main():
+    logging.disable(logging.CRITICAL)
     parser = argparse.ArgumentParser(
         description="Fetch a URL and convert its content to clean Markdown."
     )
